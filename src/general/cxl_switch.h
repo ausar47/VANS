@@ -1,11 +1,13 @@
 #ifndef VANS_CXL_SWITCH_H
 #define VANS_CXL_SWITCH_H
 
-#include "component.h"
-#include "request_queue.h"
-#include "config.h"
-#include "tick.h"
-#include "common.h" // For Tick_t
+#include "common.h" // Must come first for Tick_t, Request, GetGlobalTick
+#include "config.h" // For Config class
+#include "component.h" // For Component base class
+#include "request_queue.h" // For RequestQueue class
+
+#include <string>
+#include <vector> // For std::vector in Setup method
 
 namespace vans
 {

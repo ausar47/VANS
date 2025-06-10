@@ -1,11 +1,14 @@
 #ifndef VANS_CXL_MEM_DEVICE_H
 #define VANS_CXL_MEM_DEVICE_H
 
-#include "component.h"
-#include "config.h"
-#include "request_queue.h"
-#include "dram_memory.h" // Or static_memory, depending on the desired backing store
-#include "common.h"      // For Tick_t
+#include "common.h" // Must come first for Tick_t, Request, GetGlobalTick
+#include "config.h" // For Config class
+#include "component.h" // For Component base class
+#include "request_queue.h" // For RequestQueue class
+#include "dram_memory.h" // For DRAMMemory backend
+
+#include <string>
+#include <vector> // For std::vector in Setup method
 
 namespace vans
 {
@@ -25,12 +28,11 @@ class CXLMemDevice : public Component
     Tick_t write_latency_;       // Write latency of the CXL memory device
     uint64_t size_gb_;           // Capacity of the CXL memory device in GB
     DRAMMemory *memory_backend_; // Internal VANS memory model (e.g., DRAMMemory)
+    RequestQueue read_queue_;    // Queue for read requests
+    RequestQueue write_queue_;   // Queue for write requests
 
-    RequestQueue read_queue_;  // Queue for read requests
-    RequestQueue write_queue_; // Queue for write requests
-
-    // Helper to calculate the physical address within the CXL memory
-    uint64_t CalculatePhysicalAddress(uint64_t address) const;
+    // Helper to determine which queue to push to
+    RequestQueue& GetQueueForRequest(Request *req);
 };
 
 } // namespace vans
