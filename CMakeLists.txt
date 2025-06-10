@@ -38,6 +38,10 @@ add_executable(vans
                src/general/ddr4_system.h
                src/general/factory.cpp
                src/general/common.h
+               src/general/cxl_switch.h    # Added CXL Switch header
+               src/general/cxl_switch.cpp  # Added CXL Switch source
+               src/general/cxl_mem_device.h # Added CXL Mem Device header
+               src/general/cxl_mem_device.cpp # Added CXL Mem Device source
                )
 
 target_include_directories(vans
