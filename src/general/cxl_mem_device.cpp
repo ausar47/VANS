@@ -1,111 +1,180 @@
 #include "cxl_mem_device.h"
-#include "factory.h"
-#include "trace.h" // For logging
+#include "factory.h" // For REGISTER_COMPONENT macro
+#include "ddr4_spec.h" // Include for ddr4_spec if it's used as backend type
 
 namespace vans
 {
 
-CXLMemDevice::CXLMemDevice(const std::string &name, Config *config) :
-    Component(name, config),
+CXLMemDevice::CXLMemDevice(const std::string &name, const config &cfg) :
+    base_component(name, cfg), // Call base_component constructor
+    name_(name),               // Initialize name_
+    cfg_(cfg),                 // Initialize cfg_
     read_latency_(0),
     write_latency_(0),
     size_gb_(0),
-    memory_backend_(nullptr),
-    read_queue_(config->GetInt(name + ".read_queue_size", 32)),  // Default queue sizes
-    write_queue_(config->GetInt(name + ".write_queue_size", 32))
+    // Use base_request_queue as confirmed
+    read_queue_(cfg_.get_ulong(name_ + ".read_queue_size", 32)),  // Default queue sizes
+    write_queue_(cfg_.get_ulong(name_ + ".write_queue_size", 32))
 {
     // Parse configuration parameters
-    read_latency_ = static_cast<Tick_t>(config->GetInt(name + ".read_latency", 120)); // Default 120ns
-    write_latency_ = static_cast<Tick_t>(config->GetInt(name + ".write_latency", 100)); // Default 100ns
-    size_gb_ = static_cast<uint64_t>(config->GetInt(name + ".size_gb", 128)); // Default 128GB
+    read_latency_ = cfg_.get_ulong(name_ + ".read_latency", 120); // Default 120ns
+    write_latency_ = cfg_.get_ulong(name_ + ".write_latency", 100); // Default 100ns
+    size_gb_ = cfg_.get_ulong(name_ + ".size_gb", 128); // Default 128GB
 
-    // Create the internal memory backend (e.g., DRAMMemory or StaticMemory)
-    // The type of backend can be configured in vans.cfg if needed.
-    // For simplicity, we'll instantiate a basic DRAMMemory as the backing store.
-    // This DRAMMemory doesn't represent physical DRAM, but rather the internal
-    // VANS model for managing memory requests (e.g., address mapping, hit/miss).
-    // The CXLMemDevice itself applies the CXL-specific latencies.
-    memory_backend_ = new DRAMMemory(name + ".backend", config); // Pass config to backend as well
-
-    // The backend memory's size needs to be configured.
-    // We assume the size_gb_ parameter from CXLMemDevice config applies to the backend.
-    // This might require adding a mechanism for the CXLMemDevice to set the backend's size.
-    // For now, let's assume DRAMMemory can handle a large address space.
-    // A more robust solution would be to pass the size_gb_ to the backend config explicitly.
+    // Initialize the dram_memory backend.
+    // We are using `ddr4_spec` as the template argument for `dram_memory`.
+    // The backend should also be a base_component.
+    try {
+        // Construct the name for the backend (e.g., cxl_mem_device.backend)
+        // Pass the appropriate config section for the DRAM backend
+        memory_backend_ = std::make_shared<dram::dram_memory<dram::ddr4_spec>>(name_ + ".backend", cfg_);
+    } catch (const std::exception& e) {
+        std::cerr << "ERROR: CXLMemDevice '" << name_ << "' failed to create DRAMMemory backend: " << e.what() << std::endl;
+        throw; // Re-throw to indicate critical construction failure
+    }
 }
 
 CXLMemDevice::~CXLMemDevice()
 {
-    delete memory_backend_;
+    // shared_ptr handles deletion automatically if no other references exist.
+    // No explicit delete needed here.
 }
 
-void CXLMemDevice::Setup(Component *parent, std::vector<Component *> &children)
+void CXLMemDevice::tick_current(clk_t curr_clk)
 {
-    parent_ = parent;
-    if (!children.empty()) {
-        ERROR("CXLMemDevice '%s' does not expect child components.", name_.c_str());
-    }
-    // Setup the internal memory backend as well, potentially without children
-    memory_backend_->Setup(this, {}); // This component is the parent of the backend
-}
-
-void CXLMemDevice::Tick()
-{
-    // Process read queue
+    // Process read requests
     if (!read_queue_.empty()) {
-        Request *req = read_queue_.front();
-        if (req->arrive_time_ <= GetGlobalTick()) {
-            read_queue_.pop_front();
-            // Simulate memory access on backend (this is where actual data access happens)
-            memory_backend_->ReceiveRequest(req); // Forward to backend
+        base_request &req = read_queue_.queue.front();
+
+        // If the request is ready to be sent to the backend
+        if (req.arrive <= curr_clk) {
+            read_queue_.queue.pop_front();
+            base_response resp = memory_backend_->issue_request(req); // Forward to backend
+
+            if (!std::get<0>(resp)) { // Check the issued status (first element of tuple)
+                // Backend NACKed, re-enqueue
+                std::cerr << "WARN: CXLMemDevice '" << name_ << "' backend NACKed read request 0x"
+                          << std::hex << req.addr << std::dec << ". Re-enqueuing." << std::endl;
+                read_queue_.enqueue(req);
+            }
         }
     }
 
-    // Process write queue
+    // Process write requests
     if (!write_queue_.empty()) {
-        Request *req = write_queue_.front();
-        if (req->arrive_time_ <= GetGlobalTick()) {
-            write_queue_.pop_front();
-            // Simulate memory access on backend
-            memory_backend_->ReceiveRequest(req); // Forward to backend
+        base_request &req = write_queue_.queue.front();
+
+        // If the request is ready to be sent to the backend
+        if (req.arrive <= curr_clk) {
+            write_queue_.queue.pop_front();
+            base_response resp = memory_backend_->issue_request(req); // Forward to backend
+
+            if (!std::get<0>(resp)) { // Check the issued status (first element of tuple)
+                // Backend NACKed, re-enqueue
+                std::cerr << "WARN: CXLMemDevice '" << name_ << "' backend NACKed write request 0x"
+                          << std::hex << req.addr << std::dec << ". Re-enqueuing." << std::endl;
+                write_queue_.enqueue(req);
+            }
         }
     }
 
-    // Allow the internal memory backend to tick
-    memory_backend_->Tick();
+    // Tick the internal memory backend
+    if (memory_backend_) {
+        memory_backend_->tick_current(curr_clk); // Tick the backend explicitly
+    }
 }
 
-void CXLMemDevice::ReceiveRequest(Request *req)
+base_response CXLMemDevice::issue_request(base_request &req)
 {
-    // Apply CXL memory latency based on request type
-    if (req->type_ == Request::Type::READ) {
-        req->arrive_time_ = GetGlobalTick() + read_latency_;
-        if (!read_queue_.Push(req)) {
-            ERROR("CXLMemDevice '%s' read queue is full. Request dropped or stalled.", name_.c_str());
-        }
-    } else if (req->type_ == Request::Type::WRITE) {
-        req->arrive_time_ = GetGlobalTick() + write_latency_;
-        if (!write_queue_.Push(req)) {
-            ERROR("CXLMemDevice '%s' write queue is full. Request dropped or stalled.", name_.c_str());
-        }
-    } else if (req->type_ == Request::Type::RETURN) {
-        // This is a return from the internal memory backend
-        req->finish_time_ = GetGlobalTick();
-        parent_->ReceiveRequest(req); // Send back to the parent (CXLSwitch)
+    // Determine which queue to use based on request type
+    base_request_queue& queue = get_queue_for_request(req);
+
+    // Add latency based on request type
+    if (req.type == base_request_type::read) {
+        req.arrive = req.arrive + read_latency_;
+    } else if (req.type == base_request_type::write) {
+        req.arrive = req.arrive + write_latency_;
     } else {
-        ERROR("CXLMemDevice '%s' received unsupported request type.", name_.c_str());
+        std::cerr << "ERROR: CXLMemDevice '" << name_ << "' received unknown request type for request 0x"
+                  << std::hex << req.addr << std::dec << std::endl;
+        // Construct a NACK response as a tuple: {issued = false, deterministic = true, next_clk = current_clk}
+        return {false, true, req.arrive};
     }
 
-    // For a real CXL memory, you might also consider
-    // - address translation/mapping if CXL memory is part of a larger address space.
-    // - handling different CXL memory types (e.g., Type 2 or Type 3).
-    // - more complex queuing/scheduling within the CXL memory.
+    // Enqueue the request
+    if (!queue.enqueue(req)) {
+        std::cerr << "WARN: CXLMemDevice '" << name_ << "' request queue is full. Request 0x"
+                  << std::hex << req.addr << std::dec << " dropped or stalled." << std::endl;
+        // Construct a NACK response for full queue
+        return {false, true, req.arrive};
+    }
+    // Construct an ACK response as a tuple: {issued = true, deterministic = true, next_clk = req.arrive}
+    return {true, true, req.arrive};
 }
 
-uint64_t CXLMemDevice::CalculatePhysicalAddress(uint64_t address) const {
-    // This is a placeholder for actual address mapping if needed.
-    // For now, assuming a direct mapping within the CXL memory device's address range.
-    // This would be crucial if we want to model interleaving or multiple CXL devices.
+void CXLMemDevice::connect_next(const std::shared_ptr<base_component> &nc)
+{
+    // CXLMemDevice is a leaf node in the VANS hierarchy from the perspective of the main model.
+    // It should not connect to other components directly via 'next'.
+    // Its internal 'memory_backend_' manages its own downstream.
+    std::cerr << "WARN: CXLMemDevice '" << name_ << "' does not typically connect to 'next' components. Ignoring." << std::endl;
+}
+
+void CXLMemDevice::connect_dumper(std::shared_ptr<dumper> dumper)
+{
+    this->stat_dumper = dumper;
+    // Also connect dumper to the internal memory backend if it supports it
+    if (memory_backend_) {
+        memory_backend_->connect_dumper(dumper);
+    }
+}
+
+void CXLMemDevice::print_counters()
+{
+    // Print CXLMemDevice specific counters if any are added.
+    // Also, print counters for the internal memory backend.
+    if (memory_backend_) {
+        memory_backend_->print_counters();
+    }
+}
+
+bool CXLMemDevice::full()
+{
+    // Consider both queues and backend fullness
+    return read_queue_.full() || write_queue_.full() || (memory_backend_ ? memory_backend_->full() : false);
+}
+
+bool CXLMemDevice::pending()
+{
+    // Consider both queues and backend pending status
+    return read_queue_.pending() || write_queue_.pending() || (memory_backend_ ? memory_backend_->pending() : false);
+}
+
+void CXLMemDevice::drain()
+{
+    read_queue_.drain();
+    write_queue_.drain();
+    if (memory_backend_) {
+        memory_backend_->drain();
+    }
+}
+
+base_request_queue& CXLMemDevice::get_queue_for_request(base_request &req)
+{
+    if (req.type == base_request_type::read) {
+        return read_queue_;
+    } else if (req.type == base_request_type::write) {
+        return write_queue_;
+    } else {
+        std::cerr << "ERROR: Unsupported request type for CXLMemDevice '" << name_ << "'. Throwing error." << std::endl;
+        throw std::runtime_error("Unsupported request type in CXLMemDevice."); // Critical error
+    }
+}
+
+uint64_t CXLMemDevice::calculate_physical_address(uint64_t address) const {
+    // This method would implement the mapping from logical address to physical address within the CXL memory device.
+    // For now, a simple pass-through or basic offset might be sufficient.
+    // More complex CXL interleaving or address translation would go here.
     return address;
 }
 
