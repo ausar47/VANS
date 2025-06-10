@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <functional>
 #include <limits>
+#include <tuple> // For std::tuple
 
 namespace vans
 {
@@ -17,10 +18,12 @@ using addr_offset_t = uint64_t;
 enum : clk_t { clk_invalid = std::numeric_limits<uint64_t>::max() };
 enum : size_t { size_invalid = std::numeric_limits<size_t>::max() };
 enum : addr_t { addr_invalid = std::numeric_limits<uint64_t>::max() };
-enum : size_t { cpu_cl_size = 64, cpu_cl_bitshift = 6, /* Log2(CPU_CL_SIZE) --> Log2(64) */ };
+enum : size_t { cpu_cl_size = 64, cpu_cl_bitshift = 6 /* Log2(CPU_CL_SIZE) --> Log2(64) */ };
 
 using base_callback_f = std::function<void(logic_addr_t, clk_t)>;
-enum class base_request_type { read, write };
+
+// Existing base request types
+enum class base_request_type { read, write, cxl_mem_read, cxl_mem_write, cxl_mem_atomic, cxl_mem_snoop, cxl_mem_data };
 
 class base_request
 {
@@ -50,6 +53,7 @@ class base_request
  *   if issued and the request is dynamically served, which will call a callback function once served
  */
 using base_response = std::tuple<bool, bool, clk_t>;
+
 } // namespace vans
 
 #endif // VANS_COMMON_H
